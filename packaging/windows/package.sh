@@ -62,7 +62,8 @@ ldd "$dest/bin/bb-probe.exe" "$dest/bin/bb-gpu-capabilities.exe" |
 out/pyenv/Scripts/python.exe packaging/windows/native_dependencies.py \
     --destination "$(cygpath -am "$dest/bin")" --source "$(cygpath -am "$msys2_root/clang64/bin")"
 cp -r scripts patches "$dest/"
-cp run.py LICENSE README.md packaging/windows/README-Windows.txt "$dest/"
+cp run.py LICENSE README.md README.ru.md CHANGELOG.md packaging/windows/README-Windows.txt "$dest/"
+cp game/README.md "$dest/game/README.md"
 cp packaging/windows/START-RU.txt "$dest/НАЧАТЬ.txt"
 cp packaging/windows/START-RU.txt "$dest/game/КУДА-ПОЛОЖИТЬ-ИГРУ.txt"
 assets=fsr4_shaders
