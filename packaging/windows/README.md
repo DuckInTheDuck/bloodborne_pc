@@ -67,3 +67,21 @@ works for menus and movies.
 Not ported: the watchdog/`--timeout` thread dumps (Linux signals), userfaultfd tracking
 (`BB_UFFD`), MangoHud, PGO (GCC flags), the GTK launcher (`launcher/bbport_launcher_win.py`, Tkinter, replaces it), and
 the `tests/` programs (several use Linux-only APIs).
+
+## Portable local builds
+
+`package.sh` creates a clean archive without game files or user configuration. The
+playable copy in `dist/bbport-windows` is refreshed without deleting game files,
+preparation output, saves or mods. `portable.txt` selects local launcher settings
+in `user/launcher/settings.json`; paths inside the package are saved relative to
+the package root. External game directories remain absolute.
+
+`Bloodborne.exe` opens the launcher. `Play Bloodborne.exe` or `--play` starts
+a configured game directly and opens setup if the game folder is missing. `Settings.cmd` (or `Bloodborne.exe --launcher`) always opens settings.
+Place the decrypted game files in `game/`, or select the existing installation.
+This build keeps preparation scripts alongside the executable so later resource
+patches can be shipped without modifying the player's source installation.
+
+Validation for the local build: portable path tests, frozen script entry points,
+real game preparation into a separate lab folder, and the bundled Vulkan probe
+with Python/MSYS2 removed from PATH. Gameplay is a separate manual check.

@@ -8,6 +8,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <filesystem>
+#include "frame_timing.h"
+#include "core/emulator_settings.h"
 
 #include <SDL3/SDL.h>
 #include "bbport_settings.h"
@@ -51,7 +54,9 @@ std::mutex imgui_mutex; // the ImGui context: window thread (input) and present 
 bool initialized = false;
 std::atomic<bool> menu_open{false};
 bool l3_down = false, r3_down = false;
-bool dirty = false; // settings changed while open: saved on close
+bool controls_open = false;
+int capture_action = -1, capture_slot = 0;
+std::atomic<bool> dirty{false}; // settings changed while open: saved on close
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
 bool text_entry_active = false;
 std::string text_entry_prompt, text_entry_text;
@@ -60,14 +65,73 @@ float base_scale = 1.0f;
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
+BbTiming::History<> guest_intervals, present_intervals;
+bool presentation_suspended = false;
+FILE* timing_trace = nullptr;
+bool trace_environment_checked = false;
+std::string timing_trace_path;
+double last_trace_flush = 0;
+
+double TimingNow() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+bool OpenTimingTrace(const char* path = nullptr) {
+    std::error_code error;
+    std::filesystem::path file;
+    if (path && *path) file = path;
+    else {
+        const char* user = std::getenv("BB_GPU_USER_DIR");
+        file = std::filesystem::path(user && *user ? user : "user") /
+            ("frame-timing-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + ".csv");
+    }
+    if (!file.parent_path().empty()) std::filesystem::create_directories(file.parent_path(), error);
+    timing_trace = std::fopen(file.string().c_str(), "w");
+    if (!timing_trace) return false;
+    timing_trace_path = file.string();
+    std::fprintf(timing_trace, "event,host_time_ms,interval_ms,acquire_wait_ms,present_call_ms\n");
+    std::printf("Frame timing trace: %s\n", timing_trace_path.c_str());
+    return true;
+}
+void TraceTiming(const char* event, double time, double interval = 0,
+                 double acquire_ms = 0, double present_ms = 0) {
+    if (!trace_environment_checked) {
+        trace_environment_checked = true;
+        if (const char* path = std::getenv("BB_FRAME_TRACE"); path && *path) OpenTimingTrace(path);
+    }
+    if (!timing_trace) return;
+    std::fprintf(timing_trace, "%s,%.3f,%.3f,%.3f,%.3f\n", event,time,interval,acquire_ms,present_ms);
+    if (time - last_trace_flush > 1000) { std::fflush(timing_trace); last_trace_flush = time; }
+}
+
+void FrameTimingPanel() {
+    const auto shown = present_intervals.Get(), guest = guest_intervals.Get();
+    if (shown.count) {
+        ImGui::Text("Показ кадров: %.1f FPS, среднее %.2f мс", 1000.0/shown.mean,shown.mean);
+        ImGui::Text("p99 %.2f мс | максимум %.2f мс | разброс %.2f мс", shown.p99,shown.maximum,shown.deviation);
+        ImGui::PlotLines("##frame_intervals", present_intervals.Data(), int(present_intervals.Count()),
+                         present_intervals.Offset(), "Интервалы кадров (мс)", 0,
+                         float(std::max(40.0, shown.maximum)), ImVec2(0,70*base_scale));
+    }
+    if (guest.count) ImGui::Text("Игра: %.1f FPS | p99 %.2f мс | максимум %.2f мс",
+                                1000.0/guest.mean,guest.p99,guest.maximum);
+    ImGui::Text("Частота монитора: %u Гц | лимит: %u FPS | режим показа: %s",
+                BbDisplayRefreshHz(), EmulatorSettings.GetFrameLimit(), EmulatorSettings.GetPresentMode().c_str());
+    if (ImGui::Button(timing_trace ? "Остановить запись времени кадров" : "Записать время кадров в CSV")) {
+        trace_environment_checked = true;
+        if (timing_trace) { std::fclose(timing_trace); timing_trace=nullptr; }
+        else OpenTimingTrace();
+    }
+    if (!timing_trace_path.empty()) ImGui::TextWrapped("Лог: %s", timing_trace_path.c_str());
+    ImGui::TextDisabled("Измерены отправка кадров игрой и вызовы показа; сканирование монитора не измеряется.");
+}
 
 void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
         return;
     }
+    if (!value) capture_action = -1;
     ImGui::GetIO().MouseDrawCursor = value;
-    if (!value && dirty) {
-        dirty = false;
+    if (!value && dirty.exchange(false)) {
         BbSettings::Save();
     }
 }
@@ -134,12 +198,27 @@ void Store(std::atomic<T>& target, T value, bool changed) {
 
 void Checkbox(const char* label, std::atomic<bool>& value) {
     bool v = value;
-    Store(value, v, ImGui::Checkbox(label, &v));
+    const bool changed = ImGui::Checkbox(label, &v);
+    Store(value, v, changed);
 }
 
 void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
     float v = value;
-    Store(value, v, ImGui::SliderFloat(label, &v, lo, hi, "%.2f"));
+    const bool changed = ImGui::SliderFloat(label, &v, lo, hi, "%.2f");
+    Store(value, v, changed);
+}
+
+void MouseActionCombo(const char* label, std::atomic<int>& value) {
+    static const char* actions[] = {"Отключено", "R1 - Атака", "R2 - Сильная атака", "L1 - Смена оружия",
+                                    "L2 - Огнестрельное оружие", "Cross", "Circle", "Square", "Triangle", "R3 - Захват цели / камера", "L3"};
+    static_assert(sizeof(actions) / sizeof(actions[0]) == BB_MOUSE_ACTION_COUNT);
+    int selected = std::clamp(value.load(), 0, BB_MOUSE_ACTION_COUNT - 1);
+    if (ImGui::BeginCombo(label, actions[selected])) {
+        for (int i = 0; i < BB_MOUSE_ACTION_COUNT; ++i) {
+            if (ImGui::Selectable(actions[i], selected == i)) Store(value, i, true);
+        }
+        ImGui::EndCombo();
+    }
 }
 
 void Hint(const char* text) {
@@ -168,6 +247,10 @@ void Menu() {
     }
     ImGui::Text("%.0f FPS  (%.1f мс)", frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f,
                 frame_ms_avg);
+
+    if (ImGui::Button("Управление: клавиатура и мышь")) controls_open = true;
+
+    if (ImGui::CollapsingHeader("Плавность и время кадров")) FrameTimingPanel();
 
     ImGui::SeparatorText("Временной апскейлер");
     static const char* upscalers[] = {"Выкл", "FSR 3.1", "FSR 4 (INT8)", "FSR 4.1.1 (INT8)",
@@ -306,7 +389,10 @@ void Menu() {
     ImGui::EndDisabled(); // upscaler off
 
     ImGui::SeparatorText("Разрешение вывода");
-    static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
+    static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160",
+                                    "2560 x 1080 (21:9)", "3440 x 1440", "3840 x 1600",
+                                    "5120 x 2160", "3840 x 1080 (32:9)", "5120 x 1440 (32:9)"};
+    static_assert(sizeof(outputs) / sizeof(outputs[0]) == BbSettings::OutputCount);
     int output = s.output_res;
     if (ImGui::BeginCombo("Разрешение вывода", outputs[output])) {
         for (int i = 0; i < BbSettings::OutputCount; ++i) {
@@ -393,6 +479,85 @@ void Menu() {
     }
 }
 
+void Controls() {
+    ImGui::SetNextWindowSize(ImVec2(820.0f * base_scale, 760.0f * base_scale), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Управление", &controls_open)) { ImGui::End(); return; }
+    auto& s = BbSettings::Get();
+    ImGui::SeparatorText("Управление мышью");
+    Checkbox("Включить камеру и кнопки мышью", s.mouse_enabled);
+    ImGui::BeginDisabled(!s.mouse_enabled);
+    Slider("Чувствительность мыши по X", s.mouse_sensitivity_x, 0.1f, 5.0f);
+    Slider("Чувствительность мыши по Y", s.mouse_sensitivity_y, 0.1f, 5.0f);
+    Checkbox("Автокомпенсация ультраширокого экрана по X", s.mouse_aspect_compensation);
+    Checkbox("Инвертировать вертикальную ось", s.mouse_invert_y);
+    MouseActionCombo("Левая кнопка мыши", s.mouse_left_action);
+    MouseActionCombo("Правая кнопка мыши", s.mouse_right_action);
+    ImGui::TextDisabled("Захват мыши действует в активном окне игры; Insert открывает меню.");
+    MouseActionCombo("Средняя кнопка мыши", s.mouse_extra_action[0]);
+    MouseActionCombo("Боковая кнопка мыши 1", s.mouse_extra_action[1]);
+    MouseActionCombo("Боковая кнопка мыши 2", s.mouse_extra_action[2]);
+    ImGui::EndDisabled();
+    ImGui::SeparatorText("Раскладка клавиатуры");
+    ImGui::TextWrapped("Нажмите на назначение, затем на нужную клавишу. Insert зарезервирован для настроек. Клавиши соответствуют физическим позициям независимо от языка раскладки.");
+    if (capture_action >= 0) {
+        ImGui::Text("Нажмите клавишу: %s", BbSettings::KeyBindings[capture_action].label);
+        ImGui::SameLine();
+        if (ImGui::Button("Отменить назначение")) capture_action = -1;
+    }
+    if (ImGui::Button("Сбросить раскладку клавиатуры")) {
+        capture_action = -1;
+        for (int a = 0; a < BB_KEY_COUNT; ++a) {
+            Store(s.keyboard[a][0], BbSettings::KeyBindings[a].primary, true);
+            Store(s.keyboard[a][1], BbSettings::KeyBindings[a].secondary, true);
+        }
+    }
+    if (ImGui::BeginTable("bindings", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
+        ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+        ImGui::TableSetupColumn("Клавиша 1");
+        ImGui::TableSetupColumn("Клавиша 2");
+        ImGui::TableHeadersRow();
+        for (int a = 0; a < BB_KEY_COUNT; ++a) {
+            ImGui::PushID(a);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(BbSettings::KeyBindings[a].label);
+            for (int slot = 0; slot < 2; ++slot) {
+                ImGui::TableNextColumn();
+                ImGui::PushID(slot);
+                const int key = s.keyboard[a][slot].load();
+                const char* name = key ? SDL_GetScancodeName(static_cast<SDL_Scancode>(key)) : "Не назначено";
+                const bool waiting = capture_action == a && capture_slot == slot;
+                if (ImGui::Button(waiting ? "Нажмите клавишу..." : name, ImVec2(135.0f * base_scale, 0))) {
+                    capture_action = a;
+                    capture_slot = slot;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X")) {
+                    Store(s.keyboard[a][slot], 0, true);
+                    if (waiting) capture_action = -1;
+                }
+                if (key) {
+                    bool conflict = false;
+                    for (int b = 0; b < BB_KEY_COUNT; ++b)
+                        for (int n = 0; n < 2; ++n)
+                            conflict |= b != a && s.keyboard[b][n].load() == key;
+                    if (conflict) {
+                        ImGui::SameLine(); ImGui::TextColored(ImVec4(1,0.75f,0.3f,1), "!");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Эта клавиша назначена и другому действию: сработают оба.");
+                    }
+                }
+                ImGui::PopID();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Сохранить управление")) { BbSettings::Save(); dirty = false; }
+    ImGui::TextDisabled("Изменения действуют сразу и сохраняются при закрытии настроек.");
+    ImGui::End();
+    if (!controls_open) capture_action = -1;
+}
+
 // The game's text dialog: what is typed, and how to finish (keyboard or controller).
 void TextEntryBox() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -436,10 +601,50 @@ void FpsCounter() {
                 : s.upscaler == BbSettings::UpscalerFsr411 ? "FSR 4.1.1"
                 : s.upscaler == BbSettings::UpscalerTaa ? "TAA"
                                                          : "");
+    const auto timing = present_intervals.Get();
+    if (timing.count) ImGui::Text("p99 %.1f мс | max %.1f мс", timing.p99, timing.maximum);
     ImGui::End();
 }
 
 } // namespace
+
+void RecordGuestFrame() {
+    std::scoped_lock lock{imgui_mutex};
+    const double now = TimingNow();
+    const double interval = presentation_suspended ? 0 : guest_intervals.Mark(now);
+    TraceTiming("guest_flip", now, interval);
+}
+void RecordPresentedFrame(double acquire_ms, double present_ms) {
+    std::scoped_lock lock{imgui_mutex};
+    const double now = TimingNow();
+    if (presentation_suspended) {
+        presentation_suspended = false;
+        guest_intervals.Reset(); present_intervals.Reset();
+        TraceTiming("restore", now);
+    }
+    const double interval = present_intervals.Mark(now);
+    TraceTiming("present",now,interval,acquire_ms,present_ms);
+    static const bool resource_stats = [] {
+        const char* env = std::getenv("BB_RESOURCE_STATS");
+        return env && env[0] == '1';
+    }();
+    static double last_resource_report = 0;
+    if (resource_stats && now - last_resource_report >= 5000) {
+        last_resource_report = now;
+        const auto shown = present_intervals.Get(), guest = guest_intervals.Get();
+        std::printf("Timing trend: host_ms=%.0f present_mean_ms=%.3f present_p99_ms=%.3f "
+                    "guest_mean_ms=%.3f guest_p99_ms=%.3f acquire_ms=%.3f present_call_ms=%.3f\n",
+                    now, shown.mean, shown.p99, guest.mean, guest.p99, acquire_ms, present_ms);
+    }
+}
+void PresentationSuspended() {
+    std::scoped_lock lock{imgui_mutex};
+    if (!presentation_suspended) {
+        presentation_suspended = true;
+        guest_intervals.Reset(); present_intervals.Reset();
+        TraceTiming("minimize",TimingNow());
+    }
+}
 
 void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
     std::scoped_lock lock{imgui_mutex};
@@ -527,6 +732,13 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
+        if (down && !event.key.repeat && is_open && controls_open && capture_action >= 0 &&
+            event.key.scancode > SDL_SCANCODE_UNKNOWN && event.key.scancode < SDL_SCANCODE_COUNT &&
+            event.key.scancode != SDL_SCANCODE_INSERT) {
+            Store(BbSettings::Get().keyboard[capture_action][capture_slot], int(event.key.scancode), true);
+            capture_action = -1;
+            return true;
+        }
         if (down && !event.key.repeat &&
             (event.key.key == SDLK_INSERT || (is_open && event.key.key == SDLK_ESCAPE))) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
@@ -649,6 +861,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     ImGui::NewFrame();
     if (menu_open) {
         Menu();
+        if (controls_open && menu_open) Controls();
     }
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();

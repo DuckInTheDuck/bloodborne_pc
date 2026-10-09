@@ -6,6 +6,9 @@
 #pragma once
 
 #include <atomic>
+#include "../bbport_input.h"
+#include "../bbport_bindings.h"
+#include <SDL3/SDL_scancode.h>
 
 namespace BbSettings {
 
@@ -49,12 +52,63 @@ inline constexpr Effect Effects[] = {
 };
 inline constexpr int EffectCount = int(sizeof(Effects) / sizeof(Effects[0]));
 /// Live output resolutions: the upscaler's output and the UI host targets.
-inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840};
-inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160};
-inline constexpr int OutputCount = 4;
+inline constexpr int OutputWidths[] = {1280, 1920, 2560, 3840, 2560, 3440, 3840, 5120, 3840, 5120};
+inline constexpr int OutputHeights[] = {720, 1080, 1440, 2160, 1080, 1440, 1600, 2160, 1080, 1440};
+inline constexpr int OutputCount = sizeof(OutputWidths) / sizeof(OutputWidths[0]);
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
+struct KeyBinding {
+    const char* key;
+    const char* label;
+    int primary;
+    int secondary = 0;
+};
+inline constexpr KeyBinding KeyBindings[BB_KEY_COUNT] = {
+    {"move_up", "Движение вперёд", SDL_SCANCODE_W},
+    {"move_down", "Движение назад", SDL_SCANCODE_S},
+    {"move_left", "Движение влево", SDL_SCANCODE_A},
+    {"move_right", "Движение вправо", SDL_SCANCODE_D},
+    {"camera_up", "Камера вверх", 0},
+    {"camera_down", "Камера вниз", 0},
+    {"camera_left", "Камера влево", 0},
+    {"camera_right", "Камера вправо", 0},
+    {"cross", "Действие / подтвердить (Cross)", SDL_SCANCODE_SPACE},
+    {"circle", "Уклонение / бег / назад (Circle)", SDL_SCANCODE_LSHIFT},
+    {"square", "Использовать предмет (Square)", SDL_SCANCODE_E},
+    {"triangle", "Лечение (Triangle)", SDL_SCANCODE_Q},
+    {"l1", "Трансформация оружия (L1)", SDL_SCANCODE_1},
+    {"r1", "Атака (R1)", SDL_SCANCODE_3},
+    {"l2", "Левая рука / огнестрельное (L2)", SDL_SCANCODE_R},
+    {"r2", "Сильная атака (R2)", SDL_SCANCODE_F},
+    {"l3", "Нажатие левого стика (L3)", SDL_SCANCODE_Z},
+    {"r3", "Захват цели / сброс камеры (R3)", SDL_SCANCODE_C},
+    {"options", "Меню / инвентарь (Options)", SDL_SCANCODE_RETURN, SDL_SCANCODE_ESCAPE},
+    {"touch_left", "Левая часть touchpad", SDL_SCANCODE_TAB},
+    {"touch_right", "Правая часть touchpad", SDL_SCANCODE_BACKSPACE},
+    {"up", "Крестовина вверх", SDL_SCANCODE_UP},
+    {"down", "Крестовина вниз", SDL_SCANCODE_DOWN},
+    {"left", "Крестовина влево", SDL_SCANCODE_LEFT},
+    {"right", "Крестовина вправо", SDL_SCANCODE_RIGHT},
+    {"menu_up", "Меню: вверх", SDL_SCANCODE_W, SDL_SCANCODE_UP},
+    {"menu_down", "Меню: вниз", SDL_SCANCODE_S, SDL_SCANCODE_DOWN},
+    {"menu_left", "Меню: влево", SDL_SCANCODE_A, SDL_SCANCODE_LEFT},
+    {"menu_right", "Меню: вправо", SDL_SCANCODE_D, SDL_SCANCODE_RIGHT},
+    {"menu_confirm", "Меню: подтвердить", SDL_SCANCODE_RETURN, SDL_SCANCODE_SPACE},
+    {"menu_back", "Меню: назад", SDL_SCANCODE_ESCAPE, SDL_SCANCODE_BACKSPACE},
+    {"menu_previous", "Меню: предыдущая вкладка (L1)", SDL_SCANCODE_Q, SDL_SCANCODE_1},
+    {"menu_next", "Меню: следующая вкладка (R1)", SDL_SCANCODE_E, SDL_SCANCODE_3},
+};
+
 struct Values {
+    Values() {
+        for (int a = 0; a < BB_KEY_COUNT; ++a) {
+            keyboard[a][0] = KeyBindings[a].primary;
+            keyboard[a][1] = KeyBindings[a].secondary;
+        }
+    }
+    std::atomic<int> keyboard[BB_KEY_COUNT][2]{};
+    std::atomic<int> mouse_extra_action[3]{}; // middle, X1, X2
+
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};
     std::atomic<bool> sharpen{true};
@@ -67,6 +121,11 @@ struct Values {
     std::atomic<float> reactive_max{0.9f};
     std::atomic<int> debug_view{DebugNone};
     std::atomic<bool> show_fps{false};
+    // Mouse input is an optional layer on the virtual pad; defaults preserve gamepad behavior.
+    std::atomic<bool> mouse_enabled{true}, mouse_invert_y{false}, mouse_aspect_compensation{true};
+    std::atomic<float> mouse_sensitivity_x{1.0f}, mouse_sensitivity_y{1.0f};
+    std::atomic<int> mouse_left_action{BB_MOUSE_ACTION_R1};
+    std::atomic<int> mouse_right_action{BB_MOUSE_ACTION_L2};
     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
     std::atomic<bool> fsr4_auto_exposure{true};
     std::atomic<bool> fsr4_invert_jitter{false};

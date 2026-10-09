@@ -42,14 +42,16 @@ def run_script(name, *args, capture=False):
     script = ['--script'] if getattr(sys, 'frozen', False) else []
     command = [sys.executable, *script, str(PORT / 'scripts' / name), *map(str, args)]
     if capture:
-        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True,
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=sys.stderr, text=True, encoding='utf-8', errors='replace',
                                 creationflags=no_console())
         if result.returncode:
             sys.exit(result.returncode)
         return result.stdout
     # stdin given: the output handles are passed explicitly (a windowed Bloodborne.exe child would
     # get none otherwise).
-    result = subprocess.run(command, stdin=subprocess.DEVNULL, creationflags=no_console())
+    result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr,
+                            creationflags=no_console())
     if result.returncode:
         sys.exit(result.returncode)
     return None
@@ -87,6 +89,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     env.setdefault('BB_CONFIG', str(data / 'bbport.ini'))
     config = env['BB_CONFIG']
+    print(f'Launch configuration: {Path(config).resolve()}', flush=True)
+    for key in ('BB_READBACKS', 'BB_FPS_LIMIT', 'BB_DRAW_PIPE', 'BB_PRESENT_MODE'):
+        print(f'{key}={env.get(key, "default")}', flush=True)
     if not env.get('BB_FSR411_DIR') and not (PORT / 'fsr4_411').is_dir() and (data / 'fsr4_411').is_dir():
         env['BB_FSR411_DIR'] = str(data / 'fsr4_411')
 
@@ -135,6 +140,15 @@ def main():
         live = '0'
         if scaled_output:
             live = env.get('BB_LIVE_RES') or ini_value(config, 'live_resolution') or '0'
+            output_width, output_height = (int(v) for v in scaled_output.split('x'))
+            ultrawide = output_width * 9 != output_height * 16
+            if ultrawide:
+                # Bloodborne's camera and UI viewport need the startup resolution patch to
+                # see the 21:9 aspect ratio; the live proxy path keeps the guest at 1920x1080.
+                live = '0'
+                env.setdefault('BB_INTERNAL_WIDTH', str(output_width))
+                env.setdefault('BB_INTERNAL_HEIGHT', str(output_height))
+                print(f'Output {scaled_output}: ultrawide startup patch (live resolution disabled)')
             if live == 'auto':
                 caps = probe.parent / 'bb-gpu-capabilities.exe'
                 result = subprocess.run([str(caps), '--live-resolution'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -169,7 +183,8 @@ def main():
                    '--user', str(user_dir),
                    '--timeout', env.get('BB_TIMEOUT', '0'), *args]
         # No stdin: an inherited pipe (shells such as Git Bash) cost the game its console output.
-        return subprocess.run(command, stdin=subprocess.DEVNULL, creationflags=no_console()).returncode
+        return subprocess.run(command, stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr,
+                              creationflags=no_console()).returncode
     finally:
         if mod_view:
             shutil.rmtree(mod_view, ignore_errors=True)

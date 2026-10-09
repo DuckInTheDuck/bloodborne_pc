@@ -1,19 +1,22 @@
 /* libScePad on SDL3 gamepads, with a keyboard fallback. SDL events are pumped
  * by the window thread (gpu/shim/window.cpp); here state is only sampled.
  *
- * Keyboard layout (when no gamepad is connected):
+ * Default keyboard layout (also works alongside a gamepad; remappable in the overlay):
  *   WASD left stick, arrow keys right stick, Space Cross, LShift Circle,
  *   E Square, Q Triangle, 1 L1, 3 R1, R L2, F R2, Z L3, C R3,
- *   Enter Options, Tab left touchpad, Backspace right touchpad,
+ *   Enter/Escape Options, Tab left touchpad, Backspace right touchpad,
  *   IJKL d-pad (I up, K down, J left, L right). */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "gpu/bbgpu.h"
+#include "gpu/bbport_input.h"
+#include "gpu/bbport_bindings.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
+#include <math.h>
 #include <SDL3/SDL.h>
 #include <sys/stat.h>
 
@@ -60,6 +63,88 @@ static int initialized, opened, sdl_ready;
 static SDL_Gamepad *gamepad;
 static size_t reads;
 static uint8_t connected_count;
+static float mouse_dx, mouse_dy;
+static uint8_t mouse_buttons;
+
+void runtime_pad_mouse_motion(float dx, float dy) {
+    pthread_mutex_lock(&lock);
+    if (dx == dx && dy == dy) { /* ignore NaN from a faulty window backend */
+        mouse_dx += dx;
+        mouse_dy += dy;
+    }
+    pthread_mutex_unlock(&lock);
+}
+
+void runtime_pad_mouse_button(int button, int down) {
+    if (button < 0 || button >= 5) return;
+    pthread_mutex_lock(&lock);
+    if (down) mouse_buttons |= (uint8_t)(1u << button);
+    else mouse_buttons &= (uint8_t)~(1u << button);
+    pthread_mutex_unlock(&lock);
+}
+
+void runtime_pad_mouse_reset(void) {
+    pthread_mutex_lock(&lock);
+    mouse_dx = mouse_dy = 0.0f;
+    mouse_buttons = 0;
+    pthread_mutex_unlock(&lock);
+}
+
+static uint32_t mouse_action_button(int action) {
+    static const uint32_t buttons[BB_MOUSE_ACTION_COUNT] = {
+        0, BTN_R1, BTN_R2, BTN_L1, BTN_L2, BTN_CROSS, BTN_CIRCLE, BTN_SQUARE,
+        BTN_TRIANGLE, BTN_R3, BTN_L3,
+    };
+    return action >= 0 && action < BB_MOUSE_ACTION_COUNT ? buttons[action] : 0;
+}
+
+static void apply_mouse(PadData *d) {
+    int enabled = 0, invert_y = 0, left_action = 0, right_action = 0;
+    float aspect_scale = 1.0f;
+    float sensitivity_x = 1.0f, sensitivity_y = 1.0f;
+    bbgpu_mouse_config(&enabled, &sensitivity_x, &sensitivity_y, &aspect_scale,
+                       &invert_y, &left_action, &right_action);
+    if (!enabled) {
+        mouse_dx = mouse_dy = 0.0f;
+        runtime_mouse_camera_disable();
+        return;
+    }
+
+    uint32_t pressed = 0;
+    for (int b = 0; b < 5; ++b)
+        if (mouse_buttons & (1u << b)) pressed |= mouse_action_button(bbgpu_mouse_button_action(b));
+    d->buttons |= pressed;
+    if (pressed & BTN_L2) d->l2 = 255;
+    if (pressed & BTN_R2) d->r2 = 255;
+
+    if (runtime_mouse_camera_update(mouse_dx, mouse_dy, sensitivity_x, sensitivity_y,
+                                    aspect_scale, invert_y, (d->buttons & BTN_R3) != 0,
+                                    (int8_t)((int)d->right_x - 128),
+                                    (int8_t)((int)d->right_y - 128))) {
+        mouse_dx = mouse_dy = 0.0f;
+        return;
+    }
+
+    // Keep up to two pad samples of excess so fast motion is not discarded at the
+    // stick limit. This remains virtual-stick input and therefore keeps its speed cap.
+    const float xscale = sensitivity_x * 4.0f * aspect_scale;
+    const float yscale = sensitivity_y * 4.0f;
+    const float max_dx = 127.0f / xscale;
+    const float max_dy = 127.0f / yscale;
+    const float dx = fmaxf(-max_dx * 2.0f, fminf(mouse_dx, max_dx * 2.0f));
+    const float dy = fmaxf(-max_dy * 2.0f, fminf(mouse_dy, max_dy * 2.0f));
+    mouse_dx -= dx;
+    mouse_dy -= dy;
+    mouse_dx = fmaxf(-max_dx, fminf(mouse_dx, max_dx));
+    mouse_dy = fmaxf(-max_dy, fminf(mouse_dy, max_dy));
+    const int mx = (int)lroundf(dx * xscale);
+    int my = (int)lroundf(dy * yscale);
+    if (invert_y) my = -my;
+    const int rx = (int)d->right_x - 128 + mx;
+    const int ry = (int)d->right_y - 128 + my;
+    d->right_x = (uint8_t)(rx < -128 ? 0 : rx > 127 ? 255 : rx + 128);
+    d->right_y = (uint8_t)(ry < -128 ? 0 : ry > 127 ? 255 : ry + 128);
+}
 
 static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
 static uint8_t axis(int16_t v) { int x=(v+32768)>>8; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
@@ -71,6 +156,57 @@ static void touch_click(PadData *d, int right) {
     d->buttons|=BTN_TOUCHPAD;
     d->touch_count=1;
     d->touches[0]=(PadTouch){.x=right ? 1440 : 480,.y=471,.id=0};
+}
+
+// The caller supplies a keyboard snapshot; also used by the input regression test.
+static bool keyboard_blocked[SDL_SCANCODE_COUNT];
+static int keyboard_previous_menu=-1;
+static void apply_keyboard(PadData *d, const bool *k) {
+    if (k) {
+        const int in_menu=runtime_menu_context()!=0;
+        if (keyboard_previous_menu>=0 && in_menu!=keyboard_previous_menu)
+            for (int i=0;i<SDL_SCANCODE_COUNT;i++) keyboard_blocked[i]=k[i];
+        keyboard_previous_menu=in_menu;
+        for (int i=0;i<SDL_SCANCODE_COUNT;i++) if (!k[i]) keyboard_blocked[i]=false;
+        int keys[BB_KEY_COUNT][2];
+        bbgpu_keyboard_config(keys);
+        bool held[BB_KEY_COUNT] = {false};
+        for (int a = 0; a < BB_KEY_COUNT; ++a) {
+            for (int slot = 0; slot < 2; ++slot) {
+                const int scancode = keys[a][slot];
+                if (scancode > 0 && scancode < SDL_SCANCODE_COUNT && k[scancode] && !keyboard_blocked[scancode]) held[a] = true;
+            }
+        }
+        static const uint32_t buttons[BB_KEY_COUNT] = {
+            [BB_KEY_CROSS]=BTN_CROSS, [BB_KEY_CIRCLE]=BTN_CIRCLE,
+            [BB_KEY_SQUARE]=BTN_SQUARE, [BB_KEY_TRIANGLE]=BTN_TRIANGLE,
+            [BB_KEY_L1]=BTN_L1, [BB_KEY_R1]=BTN_R1, [BB_KEY_L2]=BTN_L2,
+            [BB_KEY_R2]=BTN_R2, [BB_KEY_L3]=BTN_L3, [BB_KEY_R3]=BTN_R3,
+            [BB_KEY_OPTIONS]=BTN_OPTIONS, [BB_KEY_UP]=BTN_UP, [BB_KEY_DOWN]=BTN_DOWN,
+            [BB_KEY_LEFT]=BTN_LEFT, [BB_KEY_RIGHT]=BTN_RIGHT,
+        };
+        if (in_menu) {
+            static const uint32_t menu_buttons[8]={BTN_UP,BTN_DOWN,BTN_LEFT,BTN_RIGHT,BTN_CROSS,BTN_CIRCLE,BTN_L1,BTN_R1};
+            for (int a=0;a<8;a++) if (held[BB_KEY_MENU_UP+a]) d->buttons|=menu_buttons[a];
+            // Keep the original d-pad bindings as optional alternatives.
+            for (int a=BB_KEY_UP;a<=BB_KEY_RIGHT;a++) if (held[a]) d->buttons|=buttons[a];
+            return;
+        }
+        for (int a = 0; a < BB_KEY_MENU_UP; ++a) if (held[a]) d->buttons |= buttons[a];
+        if (held[BB_KEY_TOUCH_LEFT]) touch_click(d,0);
+        if (held[BB_KEY_TOUCH_RIGHT]) touch_click(d,1);
+        // Keyboard axes override the controller only while one of their keys is held.
+        if (held[BB_KEY_MOVE_LEFT] || held[BB_KEY_MOVE_RIGHT])
+            d->left_x = held[BB_KEY_MOVE_LEFT] == held[BB_KEY_MOVE_RIGHT] ? 128 : held[BB_KEY_MOVE_LEFT] ? 0 : 255;
+        if (held[BB_KEY_MOVE_UP] || held[BB_KEY_MOVE_DOWN])
+            d->left_y = held[BB_KEY_MOVE_UP] == held[BB_KEY_MOVE_DOWN] ? 128 : held[BB_KEY_MOVE_UP] ? 0 : 255;
+        if (held[BB_KEY_CAMERA_LEFT] || held[BB_KEY_CAMERA_RIGHT])
+            d->right_x = held[BB_KEY_CAMERA_LEFT] == held[BB_KEY_CAMERA_RIGHT] ? 128 : held[BB_KEY_CAMERA_LEFT] ? 0 : 255;
+        if (held[BB_KEY_CAMERA_UP] || held[BB_KEY_CAMERA_DOWN])
+            d->right_y = held[BB_KEY_CAMERA_UP] == held[BB_KEY_CAMERA_DOWN] ? 128 : held[BB_KEY_CAMERA_UP] ? 0 : 255;
+        if (held[BB_KEY_L2]) d->l2=255;
+        if (held[BB_KEY_R2]) d->r2=255;
+    }
 }
 
 /* Opens the first gamepad SDL knows about; called under lock. */
@@ -90,6 +226,7 @@ static SDL_Gamepad *current_gamepad(void) {
     return gamepad;
 }
 static void sample_host(PadData *d) {
+    runtime_menu_observe();
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
     d->orientation[3]=1.0f;
@@ -128,27 +265,13 @@ static void sample_host(PadData *d) {
         }
         // Back/Select on pads without a touch surface is a left-side click.
         if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
-        if (k && k[SDL_SCANCODE_TAB]) touch_click(d,0);
-        if (k && k[SDL_SCANCODE_BACKSPACE]) touch_click(d,1);
-        return;
     }
-    if (!k) return;
-    static const struct { SDL_Scancode key; uint32_t ps; } keys[]={
-        {SDL_SCANCODE_SPACE,BTN_CROSS}, {SDL_SCANCODE_LSHIFT,BTN_CIRCLE}, {SDL_SCANCODE_E,BTN_SQUARE},
-        {SDL_SCANCODE_Q,BTN_TRIANGLE}, {SDL_SCANCODE_1,BTN_L1}, {SDL_SCANCODE_3,BTN_R1},
-        {SDL_SCANCODE_R,BTN_L2}, {SDL_SCANCODE_F,BTN_R2}, {SDL_SCANCODE_Z,BTN_L3}, {SDL_SCANCODE_C,BTN_R3},
-        {SDL_SCANCODE_RETURN,BTN_OPTIONS},
-        {SDL_SCANCODE_I,BTN_UP}, {SDL_SCANCODE_K,BTN_DOWN}, {SDL_SCANCODE_J,BTN_LEFT}, {SDL_SCANCODE_L,BTN_RIGHT},
-    };
-    for (size_t i=0;i<sizeof(keys)/sizeof(*keys);++i) if (k[keys[i].key]) d->buttons|=keys[i].ps;
-    if (k[SDL_SCANCODE_TAB]) touch_click(d,0);
-    if (k[SDL_SCANCODE_BACKSPACE]) touch_click(d,1);
-    if (d->buttons & BTN_L2) d->l2=255;
-    if (d->buttons & BTN_R2) d->r2=255;
-    d->left_x=(uint8_t)(128-(k[SDL_SCANCODE_A] ? 128 : 0)+(k[SDL_SCANCODE_D] ? 127 : 0));
-    d->left_y=(uint8_t)(128-(k[SDL_SCANCODE_W] ? 128 : 0)+(k[SDL_SCANCODE_S] ? 127 : 0));
-    d->right_x=(uint8_t)(128-(k[SDL_SCANCODE_LEFT] ? 128 : 0)+(k[SDL_SCANCODE_RIGHT] ? 127 : 0));
-    d->right_y=(uint8_t)(128-(k[SDL_SCANCODE_UP] ? 128 : 0)+(k[SDL_SCANCODE_DOWN] ? 127 : 0));
+    apply_keyboard(d, k);
+    if (runtime_menu_context()) {
+        mouse_dx=mouse_dy=0;
+        mouse_buttons=0;
+        runtime_mouse_camera_disable();
+    } else apply_mouse(d);
 }
 
 /* BB_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated

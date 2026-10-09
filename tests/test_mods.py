@@ -135,6 +135,7 @@ class ModTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mods.selected(self.moddir, config)
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX run.sh and executable shebang fixtures; Windows uses run.py')
     def test_run_uses_overlay_propagates_exit_and_cleans_view(self):
         self.mod('A')
         python = self.root / 'python'

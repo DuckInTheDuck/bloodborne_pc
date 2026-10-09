@@ -95,6 +95,7 @@ SCENE_WIDTH=0x02196A6B-EBOOT_BASE
 SCENE_HEIGHT=0x02196A7A-EBOOT_BASE
 UI_WIDTH=0x02358554-EBOOT_BASE
 UI_HEIGHT=0x0235855D-EBOOT_BASE
+CAMERA_ASPECT=0x0183A35D-EBOOT_BASE
 
 
 def read_settings(path):
@@ -111,12 +112,13 @@ def render_size(settings,override=''):
     if override:
         w,h=(int(v) for v in override.lower().split('x'))
         return (w,h)
-    if settings.get('upscaler','fsr3')=='off': return None
+    upscaler=settings.get('upscaler','fsr3')
+    if upscaler=='off': return None
     preset=int(settings.get('preset','0') or 0)
-    scale=PRESET_SCALES[max(0,min(preset,len(PRESET_SCALES)-1))]
+    scale=1.0 if upscaler=='taa' else PRESET_SCALES[max(0,min(preset,len(PRESET_SCALES)-1))]
     if scale==1.0: return None
     # Even sizes (the game has half-resolution buffers).
-    return tuple(max(2,round(v/scale/2)*2) for v in OUTPUT_SIZE)
+    return tuple(max(2,round(v/scale/2)*2) for v in output_size(settings))
 
 
 def output_size(settings):
@@ -130,13 +132,13 @@ def output_size(settings):
 
 
 def scaled_sizes(settings):
-    """(render, output) for an output other than 1080p (above it, or 720p for the Steam Deck):
-    the game renders at output / preset scale (or at the output size without upscaler) and the
-    upscaler fills the output. None at 1080p and for TAA (native, live host targets only)."""
+    """(render, output) for non-default output sizes. Reduced presets render at output/scale;
+    TAA and disabled upscaling use the full output size. The upscaler fills the output."""
     out=output_size(settings)
-    if out==OUTPUT_SIZE or settings.get('upscaler')=='taa': return None
+    if out==OUTPUT_SIZE: return None
     scale=1.0
-    if settings.get('upscaler','fsr3')!='off':
+    upscaler=settings.get('upscaler','fsr3')
+    if upscaler not in ('off','taa'):
         preset=int(settings.get('preset','0') or 0)
         scale=PRESET_SCALES[max(0,min(preset,len(PRESET_SCALES)-1))]
     render=tuple(max(2,round(v/scale/2)*2) for v in out)
@@ -146,7 +148,7 @@ def scaled_sizes(settings):
     return render,out
 
 
-def resolution_writes(xml,size,app_version,segments,ui=OUTPUT_SIZE):
+def resolution_writes(xml,size,app_version,segments,ui=OUTPUT_SIZE,aspect_size=None):
     writes=compile_patches(xml,[RESOLUTION_TEMPLATE],app_version,segments)
     replacements={SCENE_WIDTH:(0xB8,0x500,size[0]),
                   SCENE_HEIGHT:(0xB8,0x2D0,size[1]),
@@ -155,6 +157,14 @@ def resolution_writes(xml,size,app_version,segments,ui=OUTPUT_SIZE):
     out=[]
     seen=set()
     for offset,data in writes:
+        if offset==CAMERA_ASPECT:
+            if data!=bytes.fromhex('398EE33F') or offset in seen:
+                raise ValueError(f'unexpected camera aspect patch at {offset+EBOOT_BASE:#x}')
+            aspect_size=aspect_size or size
+            data=struct.pack('<f',aspect_size[0]/aspect_size[1])
+            seen.add(offset)
+            out.append((offset,data))
+            continue
         if offset in replacements:
             opcode,old,value=replacements[offset]
             if data!=bytes([opcode])+old.to_bytes(3,'little') or offset in seen:
@@ -162,8 +172,8 @@ def resolution_writes(xml,size,app_version,segments,ui=OUTPUT_SIZE):
             data=bytes([opcode])+value.to_bytes(3,'little')
             seen.add(offset)
         out.append((offset,data))
-    if seen!=replacements.keys():
-        raise ValueError('resolution patch is missing scene/UI viewport instructions')
+    if seen!=replacements.keys() | {CAMERA_ASPECT}:
+        raise ValueError('resolution patch is missing camera aspect or scene/UI viewport instructions')
     return out
 
 
@@ -301,18 +311,21 @@ def main():
         print(f'Patches: game version {version}, patches are for {a.app_version}: none applied '
               '(30 FPS, no effect or resolution patches)')
         return
+    settings=read_settings(a.settings)
+    if a.output_res:
+        settings['output_res']=a.output_res
     names=FPS_PRESETS[a.fps]+[n.strip() for n in a.extra.split(';') if n.strip()]
-    names+=[n for n in effect_patches(read_settings(a.settings)) if n not in names]
+    names+=[n for n in effect_patches(settings) if n not in names]
     validate_patch_requirements(names,a.game_dir)
     segments=eboot_segments((a.out/'eboot.elf').read_bytes())
     writes=compile_patches(a.xml,names,a.app_version,segments)
-    size=render_size(read_settings(a.settings),a.render_res) if a.render_res else None
-    # The UI keeps the game's 1920x1080 coordinates even for a larger output: the port draws
-    # it into the output-size image with a viewport scaled by output / 1920
-    # (UiComposition::NativeViewport), so it is rasterized at the output resolution.
+    size=render_size(settings,a.render_res) if a.render_res else None
+    # Preserve the game's native UI/movie layout; the renderer centers this 16:9 layer
+    # inside wider output modes.
+    output=output_size(settings)
     ui=OUTPUT_SIZE
     if size:
-        writes+=resolution_writes(a.xml,size,a.app_version,segments,ui)
+        writes+=resolution_writes(a.xml,size,a.app_version,segments,ui,output)
         if size[0]*size[1]>OUTPUT_SIZE[0]*OUTPUT_SIZE[1]:
             heap='Increased Graphics Heap Sizes'
             writes+=compile_patches(a.xml,[heap],a.app_version,segments)

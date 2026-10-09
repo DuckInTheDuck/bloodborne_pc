@@ -18,6 +18,15 @@ void runtime_restart(void);
 #define ABI __attribute__((sysv_abi))
 typedef void (ABI *GuestCallback)(void);
 void runtime_start(uint64_t capabilities);
+void runtime_menu_bind(void *image, size_t size);
+void runtime_menu_observe(void);
+/* 0: gameplay/unknown, 1: in-game menu, 2: title menu. */
+int runtime_menu_context(void);
+void runtime_mouse_camera_bind(void *image, size_t image_size);
+void runtime_mouse_camera_disable(void);
+int runtime_mouse_camera_update(float dx, float dy, float sensitivity_x, float sensitivity_y,
+                                float aspect_scale, int invert_y, int reset_camera,
+                                int8_t right_x, int8_t right_y);
 uintptr_t runtime_resolve(const char *name, int is_data);
 void runtime_report(void);
 void runtime_finalize(void *dso);

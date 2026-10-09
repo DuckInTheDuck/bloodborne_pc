@@ -32,18 +32,20 @@ FROZEN = getattr(sys, 'frozen', False)
 PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
-CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'bbport-launcher'
+PORTABLE = (PORT_DIR / 'portable.txt').is_file()
+CONFIG_DIR = DATA_DIR / 'user' / 'launcher' if PORTABLE else Path(os.environ.get('APPDATA', Path.home())) / 'bbport-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 PATCH_VERSION = '01.09'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # This build; GitHub release tags are windows-v<VERSION>.
-VERSION = '1.4'
-RELEASES_API = 'https://api.github.com/repos/Supermedo/bloodborne_pc/releases/latest'
-RELEASES_PAGE = 'https://github.com/Supermedo/bloodborne_pc/releases/latest'
+VERSION = '1.4-local'
+LOCAL_BUILD = (PORT_DIR / 'local-build.txt').is_file()
+RELEASES_API = 'https://api.github.com/repos/DuckInTheDuck/bloodborne_pc/releases/latest'
+RELEASES_PAGE = 'https://github.com/DuckInTheDuck/bloodborne_pc/releases/latest'
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'bbport-update'
 # Never copied over an installation by an update (the package does not hold them either).
-USER_FILES = ('user', 'out', 'mods', 'bbport.ini', 'mods.json', 'patches.json', 'last_run.log')
+USER_FILES = ('user', 'out', 'game', 'portable.txt', 'mods', 'bbport.ini', 'mods.json', 'patches.json', 'last_run.log')
 
 
 # ---------------------------------------------------------------------------------------------
@@ -52,17 +54,33 @@ USER_FILES = ('user', 'out', 'mods', 'bbport.ini', 'mods.json', 'patches.json', 
 def attach_stdio():
     """A windowed executable starts without sys.stdout; inherited pipes or a console still exist."""
     import msvcrt
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.GetStdHandle.argtypes = [ctypes.c_uint32]
+    kernel.GetStdHandle.restype = ctypes.c_void_p
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.DuplicateHandle.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                      ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint32,
+                                      ctypes.c_int, ctypes.c_uint32]
+    kernel.DuplicateHandle.restype = ctypes.c_int
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    process = kernel.GetCurrentProcess()
     for name, std in (('stdout', -11), ('stderr', -12)):
-        if getattr(sys, name) is not None:
+        if getattr(sys, name) is not None and not FROZEN:
             continue
         stream = None
-        handle = ctypes.windll.kernel32.GetStdHandle(std)
+        handle = kernel.GetStdHandle(std & 0xffffffff)
         if handle and handle != ctypes.c_void_p(-1).value:
-            try:
-                stream = open(msvcrt.open_osfhandle(handle, os.O_WRONLY), 'w', encoding='utf-8',
-                              errors='replace', buffering=1)
-            except OSError:
-                stream = None
+            duplicate = ctypes.c_void_p()
+            if kernel.DuplicateHandle(process, handle, process, ctypes.byref(duplicate), 0, 0, 2):
+                fd = None
+                try:
+                    # The CRT takes ownership. Duplicate first: stdout/stderr may
+                    # refer to the same inherited pipe; closing one must not close the other.
+                    fd = msvcrt.open_osfhandle(duplicate.value, os.O_WRONLY | os.O_BINARY)
+                    stream = open(fd, 'w', encoding='utf-8', errors='replace', buffering=1)
+                except OSError:
+                    if fd is None: kernel.CloseHandle(duplicate)
+                    else: os.close(fd)
         setattr(sys, name, stream or open(os.devnull, 'w'))
 
 
@@ -71,7 +89,7 @@ def run_role(argv):
     attach_stdio()
     for stream in (sys.stdout, sys.stderr):  # keep messages in order with the game's output
         try:
-            stream.reconfigure(line_buffering=True)
+            stream.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
         except (AttributeError, ValueError):
             pass
     if argv[0] == '--script':
@@ -80,6 +98,8 @@ def run_role(argv):
         path = str(PORT_DIR / 'run.py')
         sys.argv = [path, *argv[1:]]
     try:
+        # Preparation scripts may import neighboring helpers from the package.
+        sys.path.insert(0, str(Path(path).resolve().parent))
         runpy.run_path(path, run_name='__main__')
     except SystemExit as stop:
         return stop.code if isinstance(stop.code, int) else (0 if stop.code is None else 1)
@@ -161,13 +181,23 @@ INI_DEFAULTS = {'upscaler': 'fsr4', 'preset': '1', 'sharpen': '1', 'sharpness': 
                 'object_motion': '1', 'show_fps': '1', 'output_res': '1920x1080', 'model_lod': '0',
                 'live_resolution': 'auto',
                 **{key: '1' if on else '0' for key, _t, on in EFFECTS + EXTRAS + CHEATS + TWEAKS}}
-APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'), 'user_dir': '',
+APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR / 'game' if PORTABLE else PORT_DIR.parent / 'CUSA03173'), 'user_dir': '',
                 'mods_dir': '', 'mods_enabled': True, 'patches_dir': '', 'language': '1',
                 'player_name': '', 'fullscreen': False, 'hdr': False, 'present_mode': 'Mailbox',
                 'fps_mode': 'uncap', 'frame_cap': '', 'draw_pipe': '', 'readbacks': '',
                 'frames_ahead': '', 'frame_stats': False, 'gpu_profile': False,
                 'vk_validation': False, 'extra_env': '', 'close_on_play': False,
-                'check_updates': True}
+                'check_updates': not LOCAL_BUILD}
+
+from bbport_control_data import BINDINGS
+INI_DEFAULTS.update({'mouse_enabled':'1', 'mouse_sensitivity_x':'1.0', 'mouse_sensitivity_y':'1.0',
+    'mouse_invert_y':'0', 'mouse_aspect_compensation':'1', 'mouse_left_action':'1',
+    'mouse_right_action':'4', 'mouse_middle_action':'9', 'mouse_x1_action':'0', 'mouse_x2_action':'0'})
+INI_FLAGS.update(('mouse_enabled','mouse_invert_y','mouse_aspect_compensation'))
+for action, _label, primary, secondary in BINDINGS:
+    INI_DEFAULTS['key_'+action] = str(primary)
+    INI_DEFAULTS['key_'+action+'_secondary'] = str(secondary)
+APP_DEFAULTS.update({'player_fps':'auto', 'window_mode':'windowed', 'mouse_separate_axes':False})
 
 UPSCALERS = [('fsr4', ('FSR 4 (best quality)', 'FSR 4 (лучшее качество)')),
              ('fsr411', ('FSR 4.1.1 (needs fsr4_411 assets)', 'FSR 4.1.1 (нужны ассеты fsr4_411)')),
@@ -176,8 +206,16 @@ UPSCALERS = [('fsr4', ('FSR 4 (best quality)', 'FSR 4 (лучшее качест
              ('off', ('Off', 'Выключен'))]
 PRESETS = [('0', ('Native AA (×1.0)',)), ('1', ('Quality (×1.5)',)), ('2', ('Balanced (×1.7)',)),
            ('3', ('Performance (×2)',)), ('4', ('Ultra Performance (×3)',))]
-OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)), ('1920x1080', ('1920 × 1080',)),
-           ('2560x1440', ('2560 × 1440',)), ('3840x2160', ('3840 × 2160 (4K)',))]
+OUTPUTS = [(size, (label,)) for size, label in (
+    ('1280x720', '1280 x 720'), ('1920x1080', '1920 x 1080'),
+    ('2560x1440', '2560 x 1440'), ('3840x2160', '3840 x 2160 (4K)'),
+    ('2560x1080', '2560 x 1080 (Ultrawide)'),
+    ('3440x1440', '3440 x 1440 (Ultrawide)'),
+    ('3840x1600', '3840 x 1600 (Ultrawide)'),
+    ('5120x2160', '5120 x 2160 (Ultrawide)'),
+    ('3840x1080', '3840 x 1080 (32:9)'),
+    ('5120x1440', '5120 x 1440 (32:9)'))]
+
 LIVE = [('auto', ('Auto (by graphics card)', 'Авто (по видеокарте)')), ('0', ('Off (faster)', 'Выключена (быстрее)')),
         ('1', ('On (change without restarting)', 'Включена (без перезапуска)'))]
 LODS = [('0', ('As in the game', 'Как в игре')), ('-2', ('Highest (−2)', 'Максимальная (−2)')),
@@ -197,7 +235,7 @@ READBACKS = [('', ('Relaxed (default)', 'Relaxed (по умолчанию)')), (
 # Frame cap of the unlocked mode (BB_FPS_LIMIT). '' leaves the port's own: the display refresh,
 # at most 120, because the game's movement timing breaks above about 120 FPS.
 FRAME_CAPS = [('', ('Auto: display refresh, max 120 (recommended)', 'Авто: частота монитора, макс. 120 (рекомендуется)')),
-              ('60', ('60',)), ('90', ('90',)), ('120', ('120',)), ('144', ('144  ⚠',)), ('165', ('165  ⚠',)),
+              ('60', ('60',)), ('75', ('75',)), ('90', ('90',)), ('120', ('120',)), ('144', ('144  ⚠',)), ('165', ('165  ⚠',)),
               ('240', ('240  ⚠',)), ('0', ('No limit  ⚠', 'Без ограничения  ⚠'))]
 FRAMES_AHEAD = [('', ('1 (default)', '1 (по умолчанию)')), ('2', ('2',)), ('0', ('Unbounded', 'Без ограничения'))]
 UI_LANGUAGES = bbport_lang.LANGUAGE_NAMES
@@ -228,6 +266,37 @@ def load_json(path, default):
         return json.loads(Path(path).read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return default
+
+
+
+def load_app_settings():
+    settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+    if PORTABLE:
+        for key in ('game_dir', 'user_dir'):
+            value = settings.get(key)
+            if value and not Path(value).is_absolute():
+                settings[key] = str(PORT_DIR / value)
+        if not (Path(settings['game_dir'] or '.') / 'eboot.bin').is_file():
+            if (PORT_DIR / 'game' / 'eboot.bin').is_file():
+                settings['game_dir'] = str(PORT_DIR / 'game')
+    if 'player_fps' not in load_json(CONFIG_FILE, {}):
+        settings['player_fps'] = settings.get('frame_cap') or (settings.get('fps_mode', 'uncap') if settings.get('fps_mode') in ('30', '90') else 'auto')
+    if 'window_mode' not in load_json(CONFIG_FILE, {}):
+        settings['window_mode'] = 'borderless' if settings.get('fullscreen') else 'windowed'
+    return settings
+
+
+def stored_app_settings(settings):
+    result = dict(settings)
+    if PORTABLE:
+        for key in ('game_dir', 'user_dir'):
+            value = result.get(key)
+            if value:
+                try:
+                    result[key] = Path(value).resolve().relative_to(PORT_DIR).as_posix()
+                except ValueError:
+                    pass
+    return result
 
 
 def ini_path():
@@ -295,6 +364,7 @@ def game_environment(s):
     if s['hdr']:
         env['BB_HDR'] = '1'
     env['BB_FPS'] = s['fps_mode']
+    env['BB_READBACKS'] = s.get('readbacks') or '1'
     if s.get('frame_cap', ''):
         env['BB_FPS_LIMIT'] = s['frame_cap']
     for key, name in (('draw_pipe', 'BB_DRAW_PIPE'), ('readbacks', 'BB_READBACKS'), ('frames_ahead', 'BB_FRAMES_AHEAD')):
@@ -308,6 +378,11 @@ def game_environment(s):
         if '=' in item:
             key, value = item.split('=', 1)
             env[key] = value
+    selected = s.get('player_fps', 'auto')
+    env['BB_FPS'] = '30' if selected == '30' else 'uncap'
+    if selected == 'auto': env.pop('BB_FPS_LIMIT', None)
+    else: env['BB_FPS_LIMIT'] = selected
+    env['BB_FULLSCREEN'] = '1' if s.get('window_mode') == 'borderless' else '0'
     env['PYTHONUNBUFFERED'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
     return env
@@ -320,16 +395,35 @@ BG, PANEL, CARD, LINE = '#0e0c0b', '#151210', '#1c1815', '#2e2722'
 TEXT, MUTED, GOLD, BLOOD, BLOOD_HI = '#e9e2d6', '#9a8f80', '#c8a96a', '#7c1717', '#9e2222'
 
 
+def desktop_output(width, height):
+    """Choose a supported first-run size; preserve explicit user choices later."""
+    exact = f'{width}x{height}'
+    if exact in dict(OUTPUTS):
+        return exact
+    if width <= 0 or height <= 0:
+        return '1920x1080'
+    candidates = []
+    for value, _ in OUTPUTS:
+        w, h = map(int, value.split('x'))
+        if w <= width and h <= height:
+            candidates.append((abs(w/h - width/height), -(w*h), value))
+    return min(candidates)[2] if candidates else '1280x720'
+
+
 class Launcher:
     def __init__(self, root, tk, ttk, filedialog, messagebox):
         self.tk, self.ttk, self.filedialog, self.messagebox = tk, ttk, filedialog, messagebox
         self.root = root
-        self.app = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+        self.app = load_app_settings()
         self.ini, self.ini_lines = load_ini()
+        self.loaded_ini = dict(self.ini)
+        if not any(line.partition('=')[0].strip() == 'output_res' for line in self.ini_lines):
+            self.ini['output_res'] = desktop_output(root.winfo_screenwidth(), root.winfo_screenheight())
         self.vars = {}
         self.process = self.job = None
         self.downloading = False
         self.output = queue.Queue()
+        self.ui_closed = threading.Event()
         self.gpu_text = _('• Checking the graphics card…', '• Проверка видеокарты…')
         self.banner_source = self.banner_image = None
         self.ui_calls = queue.Queue()  # work for the Tk thread from helper threads
@@ -536,6 +630,7 @@ class Launcher:
         bar.pack(side='right', fill='y')
         canvas.pack(side='left', fill='both', expand=True)
         outer.scroll = lambda units: canvas.yview_scroll(units, 'units') if inner.winfo_height() > canvas.winfo_height() else None
+        outer.inner = inner
         self.pages[name] = outer
         return inner
 
@@ -550,11 +645,13 @@ class Launcher:
         tk.Label(side, text=_('native port · Windows', 'нативный порт · Windows') + f'  ·  v{VERSION}', bg=BG, fg=MUTED,
                  font=('Segoe UI', 9)).pack(anchor='w', padx=22, pady=(0, 20))
         self.nav, self.current_page = {}, None
-        for name, title in (('play', _('Play', 'Играть')), ('graphics', _('Graphics', 'Графика')),
-                            ('display', _('Display & FPS', 'Экран и FPS')), ('game', _('Game & effects', 'Игра и эффекты')),
-                            ('cheats', _('Cheats', 'Читы')), ('mods', _('Mods & patches', 'Моды и патчи')),
-                            ('advanced', _('Advanced', 'Дополнительно')),
-                            ('log', _('Log', 'Журнал'))):
+        for name, title in (('play', _('Play', '\u0418\u0433\u0440\u0430\u0442\u044c')),
+                            ('game', _('Game', '\u0418\u0433\u0440\u0430')),
+                            ('graphics', _('Graphics', '\u0413\u0440\u0430\u0444\u0438\u043a\u0430')),
+                            ('display', _('Display', '\u042d\u043a\u0440\u0430\u043d')),
+                            ('controls', _('Controls', '\u0423\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435')),
+                            ('advanced', _('Advanced', '\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e')),
+                            ('log', _('Log', '\u0416\u0443\u0440\u043d\u0430\u043b'))):
             item = tk.Label(side, text='    ' + title, bg=BG, fg=TEXT, anchor='w', font=('Segoe UI', 11),
                             pady=10, cursor='hand2')
             item.pack(fill='x')
@@ -588,6 +685,7 @@ class Launcher:
         self.build_graphics()
         self.build_display()
         self.build_game()
+        self.build_controls()
         self.build_cheats()
         self.build_mods()
         self.build_advanced()
@@ -637,13 +735,12 @@ class Launcher:
         quick.grid(row=0, column=1, sticky='nw')
         ttk.Label(quick, text=_('Quick settings', 'Основное'), style='Section.TLabel').grid(
             row=0, column=0, columnspan=2, sticky='w', pady=(0, 2))
-        self.row(quick, _('Frame rate', 'Частота кадров'), self.choice(quick, 'fps_mode', 'app', FPS_MODES, 26))
+        self.row(quick, _('Frame rate', 'Частота кадров'), self.choice(quick, 'player_fps', 'app', FPS_CHOICES, 26))
         self.row(quick, _('Upscaler', 'Апскейлер'), self.choice(quick, 'upscaler', 'ini', UPSCALERS, 26))
         self.row(quick, _('Preset', 'Пресет'), self.choice(quick, 'preset', 'ini', PRESETS, 26))
         self.row(quick, _('Output', 'Разрешение'), self.choice(quick, 'output_res', 'ini', OUTPUTS, 26))
-        ttk.Checkbutton(quick, text=_('Fullscreen', 'Полный экран'), variable=self.var('fullscreen', 'app')).grid(
-            row=self.next_row(quick), column=1, sticky='w', pady=(8, 0))
-        for key in ('fps_mode', 'upscaler', 'output_res'):
+        self.row(quick, _('Window mode', '\u0420\u0435\u0436\u0438\u043c \u043e\u043a\u043d\u0430'), self.choice(quick, 'window_mode', 'app', WINDOW_CHOICES, 26))
+        for key in ('player_fps', 'upscaler', 'output_res'):
             self.vars[key].trace_add('write', lambda *_a: self.refresh_status())
 
     def draw_banner(self):
@@ -1074,7 +1171,7 @@ class Launcher:
             else:
                 self.app[key] = value
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(self.app, indent=2, ensure_ascii=False), encoding='utf-8')
+        CONFIG_FILE.write_text(json.dumps(stored_app_settings(self.app), indent=2, ensure_ascii=False), encoding='utf-8')
         save_ini({key: self.ini[key] for key in INI_DEFAULTS}, self.ini_lines)
         self.ini, self.ini_lines = load_ini()
         if self.mod_order:
@@ -1109,18 +1206,54 @@ class Launcher:
             self.process = None
             return
         self.job = GameJob(self.process)
-        threading.Thread(target=self.read_output, args=(self.process,), daemon=True).start()
+        log_path = Path(self.app.get('user_dir') or DATA_DIR / 'user') / 'last_run.log'
+        from bbport_hang_diagnostics import start as start_hang_diagnostics
+        start_hang_diagnostics(self.process, PORT_DIR / 'bin/bb-probe.exe',
+                               log_path.parent / 'diagnostics', self.queue_output)
+        # Keep the pipe reader alive after Tk closes. Otherwise a slow prepare
+        # child writes into a closed pipe and fails with Windows EINVAL.
+        threading.Thread(target=self.read_output, args=(self.process, log_path), daemon=False).start()
         self.play_button.configure(state='disabled')
         self.stop_button.configure(state='normal')
         self.status.configure(text=_('Preparing the game; it opens in its own window…',
                                      'Подготовка игры; она откроется в своём окне…'), fg=GOLD)
         if self.app.get('close_on_play'):
-            self.root.after(5000, self.root.destroy)  # the game keeps running
+            self.root.after(5000, self.detach_window)
 
-    def read_output(self, process):
-        for raw in iter(process.stdout.readline, b''):
-            self.output.put(raw.decode('utf-8', errors='replace'))
-        self.output.put((process.wait(),))
+    def queue_output(self, message):
+        if not self.ui_closed.is_set():
+            self.output.put(message)
+
+    def detach_window(self):
+        self.ui_closed.set()
+        self.root.destroy()
+
+    def read_output(self, process, log_path=None):
+        log = None
+        if log_path:
+            try:
+                log_path = Path(log_path)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                if log_path.is_file():
+                    shutil.copy2(log_path, log_path.with_name('last_run.previous.log'))
+                log = log_path.open('w', encoding='utf-8', buffering=1)
+            except OSError as error:
+                self.queue_output(f'Cannot record full launch log: {error}\n')
+        try:
+            for raw in iter(process.stdout.readline, b''):
+                text = raw.decode('utf-8', errors='replace')
+                self.queue_output(text)
+                if log:
+                    try:
+                        log.write(text)
+                    except OSError:
+                        log.close()
+                        log = None
+            result = process.wait()
+            if log: log.write(f'\nLauncher: process exited with code {result}\n')
+            self.queue_output((result,))
+        finally:
+            if log: log.close()
 
     def drain_output(self):
         while not self.ui_calls.empty():
@@ -1185,6 +1318,11 @@ class Launcher:
     # ---- updates -------------------------------------------------------------------------------
     def check_update(self, manual=False):
         """Helper thread: asks GitHub for the newest release and offers it when it is newer."""
+        if LOCAL_BUILD:
+            if manual:
+                self.ui_calls.put(lambda: self.messagebox.showinfo('Bloodborne',
+                    'This local build contains custom changes. Upstream updates replace the entire port.'))
+            return
         try:
             version, url, page = latest_release()
         except (OSError, ValueError, KeyError) as failure:
@@ -1223,6 +1361,8 @@ class Launcher:
             self.status.configure(text=text, fg=GOLD)
 
     def install_update(self, version, url, page):
+        if LOCAL_BUILD:
+            return
         if self.process:
             self.messagebox.showinfo('Bloodborne', _('Close the game before updating.', 'Закройте игру перед обновлением.'))
             return
@@ -1308,7 +1448,7 @@ class Launcher:
             self.collect()
         except Exception:  # never keep the window open over a settings problem
             pass
-        self.root.destroy()
+        self.detach_window()
 
 
 class GameJob:
@@ -1342,6 +1482,9 @@ def play_without_window(settings):
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+        from bbport_hang_diagnostics import start as start_hang_diagnostics
+        start_hang_diagnostics(process, PORT_DIR / 'bin/bb-probe.exe',
+                               log_dir / 'diagnostics', lambda text: print(text, end='', flush=True))
         for raw in iter(process.stdout.readline, b''):
             text = raw.decode('utf-8', errors='replace')
             log.write(text)
@@ -1400,14 +1543,18 @@ def main():
     args = sys.argv[1:]
     if args and args[0] in ('--run', '--script'):
         sys.exit(run_role(args))
-    settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+    settings = load_app_settings()
     LANG = settings.get('ui_language') or windows_language()
     if args[:1] == ['--install-update'] and len(args) == 3:
         sys.exit(install_update(args[1], args[2]))
     if FROZEN and UPDATE_DIR not in PORT_DIR.parents:
         shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # what a finished update left behind
     # Without a usable game folder there is nothing to play yet: open the launcher instead.
-    if '--play' in args and (Path(settings['game_dir'] or '.') / 'eboot.bin').is_file():
+    if PORTABLE and not (Path(settings['game_dir'] or '.') / 'eboot.bin').is_file():
+        if (PORT_DIR / 'game' / 'eboot.bin').is_file():
+            settings['game_dir'] = str(PORT_DIR / 'game')
+    direct = '--play' in args
+    if direct and game_info(settings['game_dir']):
         sys.exit(play_without_window(settings))
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays
@@ -1419,6 +1566,9 @@ def main():
     Launcher(root, tk, ttk, filedialog, messagebox)
     root.mainloop()
 
+
+from bbport_player_ui import install, FPS_CHOICES, WINDOW_CHOICES
+install(Launcher, globals())
 
 if __name__ == '__main__':
     main()

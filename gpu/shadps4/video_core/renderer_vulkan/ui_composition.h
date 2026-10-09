@@ -7,6 +7,11 @@
 
 namespace Vulkan::UiComposition {
 
+constexpr uint32_t PillarboxMargin(uint32_t width, uint32_t height) {
+    const auto content = uint64_t(height) * 16 / 9;
+    return content < width ? uint32_t((width - content) / 2) : 0;
+}
+
 enum class Background { None, Copy, Temporal };
 
 // UI composition must not require scene depth/camera or an active FSR context.
@@ -32,8 +37,14 @@ constexpr bool MovieShader(uint64_t hash) {
 inline std::array<float, 2> Scale(uint32_t guest_width, uint32_t guest_height,
                                 uint32_t output_width, uint32_t output_height,
                                 bool native_coordinates) {
-    return {float(output_width) / float(native_coordinates ? 1920 : guest_width),
-            float(output_height) / float(native_coordinates ? 1080 : guest_height)};
+    if (native_coordinates) {
+        // Scaleform uses 1920x1080 coordinates. Fit by height without stretching
+        // the UI horizontally on ultrawide output; preserve scaling at 720p/4K.
+        const float scale = float(output_height) / 1080.0f;
+        return {scale, scale};
+    }
+    return {float(output_width) / float(guest_width),
+            float(output_height) / float(guest_height)};
 }
 
 } // namespace Vulkan::UiComposition

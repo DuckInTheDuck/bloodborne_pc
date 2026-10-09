@@ -1128,7 +1128,7 @@ void TemporalUpscaler::Run() {
         info.enableSharpening = BbSettings::Get().sharpen ? VK_TRUE : VK_FALSE;
         info.reset = reset ? VK_TRUE : VK_FALSE;
         info.frameId = frame_id++;
-    
+
         FfxVkPortableUpscaleCreateInfo create_info{};
         create_info.structSize = sizeof(create_info);
         create_info.flags = FFX_VK_PORTABLE_CONTEXT_HDR_COLOR_INPUT | FFX_VK_PORTABLE_CONTEXT_AUTO_EXPOSURE;
@@ -1485,13 +1485,29 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     };
     cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+    // UI-only backgrounds stay inside the native 16:9 composition area. Never
+    // copy stale scene pixels into the ultrawide bars on menus/loading screens.
+    const u32 margin = UiComposition::PillarboxMargin(ui_width, ui_height);
+    const u32 source_margin = u32(uint64_t(source_width) * margin / ui_width);
+    if (margin) {
+        const vk::ClearColorValue black{std::array<float, 4>{0, 0, 0, 1}};
+        cmd.clearColorImage(vk::Image(ui_image), vk::ImageLayout::eTransferDstOptimal,
+                           black, barrier.subresourceRange);
+        const vk::MemoryBarrier2 clear_done{
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        };
+        cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &clear_done});
+    }
     const vk::ImageBlit region{
         .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .srcOffsets = std::array{vk::Offset3D{0, 0, 0},
-            vk::Offset3D{s32(source_width), s32(source_height), 1}},
+        .srcOffsets = std::array{vk::Offset3D{s32(source_margin), 0, 0},
+            vk::Offset3D{s32(source_width - source_margin), s32(source_height), 1}},
         .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .dstOffsets = std::array{vk::Offset3D{0, 0, 0},
-            vk::Offset3D{s32(ui_width), s32(ui_height), 1}},
+        .dstOffsets = std::array{vk::Offset3D{s32(margin), 0, 0},
+            vk::Offset3D{s32(ui_width - margin), s32(ui_height), 1}},
     };
     cmd.blitImage(source, source_layout,
                   vk::Image(ui_image), vk::ImageLayout::eTransferDstOptimal, region,

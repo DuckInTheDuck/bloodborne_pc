@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "bbport_overlay.h"
+#include "../bbport_input.h"
 
 namespace Frontend {
 
@@ -81,6 +82,8 @@ void WindowSDL::UpdateTextTitle() {
 }
 
 bool WindowSDL::PollEvents() {
+    int mouse_enabled = 0;
+    bbgpu_mouse_config(&mouse_enabled, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     {
         std::scoped_lock lock{text_mutex};
         if (text_requested) { // SDL text input must be toggled from the window thread
@@ -126,6 +129,31 @@ bool WindowSDL::PollEvents() {
             continue;
         }
         switch (event.type) {
+        case SDL_EVENT_MOUSE_MOTION:
+            if (mouse_captured) runtime_pad_mouse_motion(event.motion.xrel, event.motion.yrel);
+            break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (mouse_captured) {
+                const int button = event.button.button == SDL_BUTTON_LEFT ? 0
+                                   : event.button.button == SDL_BUTTON_RIGHT ? 1
+                                   : event.button.button == SDL_BUTTON_MIDDLE ? 2
+                                   : event.button.button == SDL_BUTTON_X1 ? 3
+                                   : event.button.button == SDL_BUTTON_X2 ? 4 : -1;
+                runtime_pad_mouse_button(button, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+            }
+            break;
+        case SDL_EVENT_WINDOW_MINIMIZED:
+            minimized = true;
+            runtime_pad_mouse_reset();
+            break;
+        case SDL_EVENT_WINDOW_RESTORED:
+        case SDL_EVENT_WINDOW_MAXIMIZED:
+            minimized = false;
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            runtime_pad_mouse_reset();
+            break;
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         case SDL_EVENT_WINDOW_RESIZED: {
             int w = 0, h = 0;
@@ -140,6 +168,17 @@ bool WindowSDL::PollEvents() {
             break;
         default:
             break;
+        }
+    }
+    const auto flags = SDL_GetWindowFlags(window);
+    minimized = (flags & SDL_WINDOW_MINIMIZED) != 0;
+    const bool focused = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
+    const bool want_mouse = mouse_enabled && focused && IsDrawable() && !text_active &&
+                            !BbOverlay::CapturesInput();
+    if (want_mouse != mouse_captured) {
+        if (SDL_SetWindowRelativeMouseMode(window, want_mouse)) {
+            mouse_captured = want_mouse;
+            runtime_pad_mouse_reset();
         }
     }
     return is_open;

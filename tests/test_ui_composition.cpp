@@ -4,6 +4,9 @@
 #include "gpu/shadps4/video_core/renderer_vulkan/ui_composition.h"
 
 int main() {
+    assert(Vulkan::UiComposition::PillarboxMargin(2560,1080)==320);
+    assert(Vulkan::UiComposition::PillarboxMargin(3440,1440)==440);
+    assert(Vulkan::UiComposition::PillarboxMargin(1920,1080)==0);
     using namespace Vulkan::UiComposition;
     // Title/loading menus have no depth/camera. UI must still go to the native target.
     assert(Choose(true, true, false, true) == Background::Copy);
@@ -25,5 +28,11 @@ int main() {
     assert(ui[0] == 1 && ui[1] == 1); // don't double an already native UI viewport
     const auto larger = Scale(960, 540, 3840, 2160, true);
     assert(larger[0] == 2 && larger[1] == 2);
+    const auto ultrawide = Scale(960, 540, 2560, 1080, true);
+    assert(ultrawide[0] == 1 && ultrawide[1] == 1);
+    const auto ultrawide1440 = Scale(960, 540, 3440, 1440, true);
+    assert(ultrawide1440[0] == ultrawide1440[1] && ultrawide1440[1] == 1440.0f / 1080.0f);
+    const auto smaller = Scale(960, 540, 1280, 720, true);
+    assert(smaller[0] == smaller[1] && smaller[1] == 720.0f / 1080.0f);
     std::puts("UI composition: PASS (menu without camera, HUD, FSR off, viewport scaling)");
 }

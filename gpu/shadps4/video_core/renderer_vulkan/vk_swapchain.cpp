@@ -32,14 +32,27 @@ Swapchain::~Swapchain() {
     instance.GetInstance().destroySurfaceKHR(surface);
 }
 
-void Swapchain::Create(u32 width_, u32 height_) {
+bool Swapchain::Create(u32 width_, u32 height_) {
+    needs_recreation = true;
+    if (!window.IsDrawable()) return false;
+    if (surface_lost) {
+        Destroy();
+        instance.GetInstance().destroySurfaceKHR(surface);
+        surface = CreateSurface(instance.GetInstance(), window);
+        surface_lost = false;
+        FindPresentFormat();
+        FindPresentMode();
+    }
+    // Keep the old swapchain until the surface has a drawable extent. On Windows
+    // SDL may retain the old window size while Vulkan temporarily reports 0x0.
+    const u32 old_width = width, old_height = height;
     width = width_;
     height = height_;
-    needs_recreation = false;
-
+    if (!SetSurfaceProperties() || !window.IsDrawable() || !extent.width || !extent.height) {
+        width = old_width; height = old_height;
+        return false;
+    }
     Destroy();
-
-    SetSurfaceProperties();
 
     const std::array queue_family_indices = {
         instance.GetGraphicsQueueFamilyIndex(),
@@ -71,18 +84,26 @@ void Swapchain::Create(u32 width_, u32 height_) {
     };
 
     auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
+    if (swapchain_result == vk::Result::eErrorSurfaceLostKHR ||
+        swapchain_result == vk::Result::eErrorOutOfDateKHR) {
+        surface_lost = swapchain_result == vk::Result::eErrorSurfaceLostKHR;
+        return false;
+    }
     ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
                vk::to_string(swapchain_result));
     swapchain = chain;
 
     SetupImages();
     RefreshSemaphores();
+    frame_index = image_index = 0;
+    needs_recreation = false;
+    return true;
 }
 
-void Swapchain::Recreate(u32 width_, u32 height_) {
+bool Swapchain::Recreate(u32 width_, u32 height_) {
     LOG_DEBUG(Render_Vulkan, "Recreate the swapchain: width={} height={} HDR={}", width_, height_,
               needs_hdr);
-    Create(width_, height_);
+    return Create(width_, height_);
 }
 
 void Swapchain::SetHDR(bool hdr) {
@@ -105,14 +126,20 @@ void Swapchain::SetHDR(bool hdr) {
 bool Swapchain::AcquireNextImage() {
     vk::Device device = instance.GetDevice();
     vk::Result result =
-        device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
+        device.acquireNextImageKHR(swapchain, 20000000u,
                                    image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
 
     switch (result) {
     case vk::Result::eSuccess:
         break;
+    case vk::Result::eTimeout:
+    case vk::Result::eNotReady:
+        return false; // bounded wait: the window may have minimized after the check
     case vk::Result::eSuboptimalKHR:
     case vk::Result::eErrorSurfaceLostKHR:
+        surface_lost = true;
+        needs_recreation = true;
+        break;
     case vk::Result::eErrorOutOfDateKHR:
     case vk::Result::eErrorUnknown:
         needs_recreation = true;
@@ -137,7 +164,10 @@ bool Swapchain::Present() {
     };
 
     auto result = instance.GetPresentQueue().presentKHR(present_info);
-    if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+    if (result == vk::Result::eErrorSurfaceLostKHR) {
+        surface_lost = true;
+        needs_recreation = true;
+    } else if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
@@ -220,9 +250,14 @@ void Swapchain::FindPresentMode() {
     }
 }
 
-void Swapchain::SetSurfaceProperties() {
+bool Swapchain::SetSurfaceProperties() {
     const auto [capabilities_result, capabilities] =
         instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
+    if (capabilities_result == vk::Result::eErrorSurfaceLostKHR) {
+        surface_lost = true;
+        return false;
+    }
+    if (capabilities_result == vk::Result::eErrorOutOfDateKHR) return false;
     ASSERT_MSG(capabilities_result == vk::Result::eSuccess,
                "Failed to query surface capabilities: {}", vk::to_string(capabilities_result));
 
@@ -251,6 +286,7 @@ void Swapchain::SetSurfaceProperties() {
     if (!(capabilities.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eOpaque)) {
         composite_alpha = vk::CompositeAlphaFlagBitsKHR::eInherit;
     }
+    return extent.width != 0 && extent.height != 0;
 }
 
 void Swapchain::Destroy() {
@@ -265,9 +301,11 @@ void Swapchain::Destroy() {
         device.destroyImageView(image_view);
     }
     images_view.clear();
+    images.clear();
 
     if (swapchain) {
         device.destroySwapchainKHR(swapchain);
+        swapchain = nullptr;
     }
 
     for (const auto& sem : image_acquired) {

@@ -834,6 +834,7 @@ public:
 
     /// CommandBuffer() calls that waited for a recording thread (BB_FRAME_STATS).
     static inline std::atomic<u64> direct_recordings{0};
+    std::chrono::steady_clock::time_point resource_stats_time{};
 
     /// Returns the current command buffer tick.
     [[nodiscard]] u64 CurrentTick() const noexcept {

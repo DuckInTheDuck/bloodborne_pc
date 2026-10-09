@@ -1,3 +1,16 @@
+Portable build quick start
+
+1. Put your own decrypted Bloodborne files in game/ (eboot.bin, sce_sys, dvdroot_ps4),
+   or open Settings.cmd and select an existing game folder.
+2. Run Bloodborne.exe, choose settings and click PLAY.
+   Play Bloodborne.exe starts the configured game directly. Settings.cmd opens the launcher.
+3. No MSYS2, Python, compiler or Vulkan SDK installation is needed by players.
+   A compatible Vulkan graphics driver is required.
+4. Keep portable.txt to store launcher settings in user/launcher/settings.json.
+   Game files are not included. Preparation writes generated files to out/ and uses
+   mod overlays rather than modifying the source game installation.
+5. When updating, preserve game/, user/, out/, mods/ and configuration files.
+
 Bloodborne (bbport) for Windows
 ===============================
 
@@ -62,3 +75,14 @@ Credits
 - bbport (the Linux port this is built on): https://github.com/deadinside28/bloodborne_pc
 - Windows port: https://github.com/Supermedo/bloodborne_pc
 - The full list of projects and patch authors is in README.md (Credits and licenses).
+
+Custom local builds disable upstream auto-updates, which replace the entire port.
+
+Player launcher layout
+- Game: source folder, saves, language and intro skipping.
+- Graphics: anti-aliasing/upscaling, quality, model detail, FPS counter and effects.
+- Display: resolution, one FPS cap selector, windowed/borderless fullscreen and HDR.
+- Controls: keyboard bindings, five mouse buttons and independent X/Y sensitivity.
+- Advanced: rendering experiments, diagnostics and repair of missing FSR4 assets.
+New profiles enable mouse camera. Existing bindings are kept. Extra-wide loading/menu
+backgrounds use black bars in UI-only frames; loading fade timing is unchanged.

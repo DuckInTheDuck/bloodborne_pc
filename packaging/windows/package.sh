@@ -37,8 +37,15 @@ out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN
 # The package is assembled in a fresh staging folder and zipped from there; dist/bbport-windows
 # (a playable copy that may hold saves and settings) is only refreshed afterwards.
 dest=out/stage/bbport-windows
-rm -rf -- out/stage
-mkdir -p "$dest/bin" "$dest/launcher"
+# Validate the staging target before removing it; never touch a playable installation.
+stage_absolute=$(cygpath -am "$PWD/out/stage")
+[[ "$stage_absolute" == "$(cygpath -am "$PWD")/out/stage" ]] || exit 1
+powershell -NoProfile -Command "if (Test-Path -LiteralPath '$stage_absolute') { Remove-Item -LiteralPath '$stage_absolute' -Recurse -Force }"
+mkdir -p "$dest/bin" "$dest/launcher" "$dest/game"
+printf 'Custom local build: do not replace with upstream auto-updates.\n' > "$dest/local-build.txt"
+printf 'Portable installation: settings and saves live in user/.\n' > "$dest/portable.txt"
+printf '@echo off\r\ncd /d "%%~dp0"\r\nstart "" "%%~dp0Bloodborne.exe" --launcher\r\n' > "$dest/Settings.cmd"
+printf 'Place your own decrypted game files here: eboot.bin, sce_sys/, dvdroot_ps4/.\nOr select an existing game folder in Settings.cmd.\n' > "$dest/game/README.txt"
 cp -r out/pyi-dist/Bloodborne/. "$dest/"
 llvm-strip -o "$dest/Play Bloodborne.exe" out/bb-play.exe
 cp launcher/bloodborne.ico launcher/bloodborne.png "$dest/launcher/"
@@ -51,9 +58,25 @@ ldd "$dest/bin/bb-probe.exe" "$dest/bin/bb-gpu-capabilities.exe" |
     awk '/\/clang64\/bin\// {print $3}' | sort -u | while read -r dll; do
         cp -u "$dll" "$dest/bin/"
     done
+# Resolve imports recursively, including DLLs ldd found outside CLANG64.
+out/pyenv/Scripts/python.exe packaging/windows/native_dependencies.py \
+    --destination "$(cygpath -am "$dest/bin")" --source "$(cygpath -am "$msys2_root/clang64/bin")"
 cp -r scripts patches "$dest/"
 cp run.py LICENSE README.md packaging/windows/README-Windows.txt "$dest/"
-if [[ -d fsr4_shaders ]]; then cp -r fsr4_shaders "$dest/"; fi
+cp packaging/windows/START-RU.txt "$dest/НАЧАТЬ.txt"
+cp packaging/windows/START-RU.txt "$dest/game/КУДА-ПОЛОЖИТЬ-ИГРУ.txt"
+assets=fsr4_shaders
+if [[ ! -d "$assets" && -d dist/bbport-windows/fsr4_shaders ]]; then assets=dist/bbport-windows/fsr4_shaders; fi
+if [[ -d "$assets" ]]; then
+    [[ -f "$assets/LICENSE-FSR4-v07.txt" ]] || { echo 'FSR4 assets need their license notice' >&2; exit 1; }
+    cp -r "$assets" "$dest/fsr4_shaders"
+fi
+if [[ -n ${BB_PACKAGE_PROFILE_DIR:-} ]]; then
+    out/pyenv/Scripts/python.exe packaging/windows/portable_profile.py \
+        --source "$(cygpath -am "$BB_PACKAGE_PROFILE_DIR")" --destination "$(cygpath -am "$dest")"
+fi
+# Development experiments are not part of the player distribution.
+rm -f "$dest/scripts/pc_prompt_trial.py" "$dest/scripts/pc_prompt_gpu_trial.py" "$dest/scripts/inspect_pc_prompts.py"
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
 mkdir -p dist
 rm -f dist/bbport-windows.zip
@@ -65,12 +88,13 @@ rm -f dist/bbport-windows.zip
 play=dist/bbport-windows
 running=$(powershell -NoProfile -Command \
     "@(Get-Process | Where-Object { \$_.Path -like '$(cygpath -w "$PWD/$play")\\*' }).Count" | tr -d '\r')
-if [[ ${running:-0} != 0 ]]; then
+if [[ -n ${BB_PACKAGE_PROFILE_DIR:-} ]]; then
+    echo 'Portable profile package ready; local playable installation preserved.'
+elif [[ ${running:-0} != 0 ]]; then
     echo "dist/bbport-windows is in use ($running processes): not refreshed; the zip is ready." >&2
 else
     mkdir -p "$play"
-    find "$play" -mindepth 1 -maxdepth 1 ! -name user ! -name mods ! -name bbport.ini \
-        ! -name mods.json ! -name patches.json -exec rm -rf {} +
+    # Overlay program files only: preserve game files, preparation output and user data.
     cp -r "$dest/." "$play/"
 fi
 du -sh "$dest" dist/bbport-windows.zip

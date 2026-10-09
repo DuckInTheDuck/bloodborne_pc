@@ -2,12 +2,26 @@
 #include <assert.h>
 #include <unistd.h>
 #include "../src/runtime_pad.c"
+void runtime_menu_observe(void) {}
+int runtime_menu_context(void) { return 0; }
 
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;
+}
+
+void bbgpu_keyboard_config(int keys[BB_KEY_COUNT][2]) { memset(keys,0,sizeof(int)*BB_KEY_COUNT*2); }
+int bbgpu_mouse_button_action(int button) { (void)button; return 0; }
+void bbgpu_mouse_config(int *enabled,float *sx,float *sy,float *aspect,int *invert,int *left,int *right) {
+    *enabled=0; *sx=*sy=*aspect=1; *invert=*left=*right=0;
+}
+void runtime_mouse_camera_disable(void) {}
+int runtime_mouse_camera_update(float dx,float dy,float sx,float sy,float aspect,int invert,
+                               int reset,int8_t rx,int8_t ry) {
+    (void)dx; (void)dy; (void)sx; (void)sy; (void)aspect; (void)invert;
+    (void)reset; (void)rx; (void)ry; return 0;
 }
 
 static void inject(const char *path, const char *tokens) {

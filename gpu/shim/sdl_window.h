@@ -27,6 +27,7 @@ public:
     s32 GetHeight() const { return height.load(std::memory_order_relaxed); }
     SDL_Window* GetSDLWindow() const { return window; }
     WindowSystemInfo GetWindowInfo() const { return window_info; }
+    bool IsDrawable() const { return !minimized.load(std::memory_order_relaxed) && GetWidth() > 0 && GetHeight() > 0; }
     bool IsOpen() const { return is_open.load(std::memory_order_relaxed); }
     /// Processes pending window events. Returns false once the user closed the window.
     bool PollEvents();
@@ -38,8 +39,10 @@ public:
 private:
     std::atomic<s32> width, height;
     std::atomic<bool> is_open{true};
+    std::atomic<bool> minimized{false};
     std::mutex text_mutex;
     bool text_requested{}, text_active{};
+    bool mouse_captured{};
     int text_state{};
     std::string text, text_prompt, base_title;
     void UpdateTextTitle();

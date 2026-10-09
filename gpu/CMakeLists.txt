@@ -213,6 +213,21 @@ if (WIN32)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
+add_executable(frame-timing-test EXCLUDE_FROM_ALL ../tests/test_frame_timing.cpp)
+target_compile_options(frame-timing-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(frame-timing-test PRIVATE ..)
+add_executable(controls-input-test EXCLUDE_FROM_ALL ../tests/test_controls_input.c)
+set_target_properties(controls-input-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+target_compile_options(controls-input-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(controls-input-test PRIVATE .. ../src)
+target_link_libraries(controls-input-test PRIVATE PkgConfig::SDL3 -pthread)
+if (NOT WIN32)
+    target_link_libraries(controls-input-test PRIVATE m)
+endif()
+add_executable(controls-settings-test EXCLUDE_FROM_ALL ../tests/test_controls_settings.cpp)
+target_compile_options(controls-settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(controls-settings-test PRIVATE PkgConfig::SDL3)
+
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
 target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(motion-history-test PRIVATE ..)
@@ -249,6 +264,7 @@ add_dependencies(camera-motion-test host_shaders)
 add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
     shim/bbport_settings.cpp)
 target_include_directories(upscaler-support-test PRIVATE shim)
+target_link_libraries(upscaler-support-test PRIVATE PkgConfig::SDL3)
 target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
 
 add_executable(fsr4-bench EXCLUDE_FROM_ALL tools/fsr4_bench.cpp

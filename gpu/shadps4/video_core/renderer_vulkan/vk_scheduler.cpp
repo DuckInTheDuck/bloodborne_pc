@@ -396,6 +396,30 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
+    // Opt-in, low-frequency resource trend; never reset queues or caches here.
+    static const bool resource_stats = [] {
+        const char* env = std::getenv("BB_RESOURCE_STATS");
+        return env && env[0] == '1';
+    }();
+    if (resource_stats) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - resource_stats_time >= std::chrono::seconds(5)) {
+            resource_stats_time = now;
+            size_t pooled, queued;
+            {
+                std::scoped_lock record_lock{recorder_mutex};
+                pooled = free_chunks.size();
+                queued = recorder_queue.size();
+            }
+            const bool budget = instance.CanReportMemoryUsage();
+            std::printf("Resource trend: scheduler=%p tick=%llu pooled_chunks=%zu queued_chunks=%zu "
+                        "pending_ops=%u gpu_usage_bytes=%llu gpu_budget_bytes=%llu\n",
+                        static_cast<void*>(this), static_cast<unsigned long long>(CurrentTick()),
+                        pooled, queued, num_pending_ops.load(std::memory_order_relaxed),
+                        static_cast<unsigned long long>(budget ? instance.GetDeviceMemoryUsage() : 0),
+                        static_cast<unsigned long long>(budget ? instance.GetDeviceMemoryBudgetNow() : 0));
+        }
+    }
     const u64 signal_value = work_semaphore.NextTick();
 
 #if TRACY_GPU_ENABLED

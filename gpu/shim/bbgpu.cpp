@@ -27,6 +27,7 @@
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
+#include "core/emulator_settings.h"
 #include "core/signals.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -220,7 +221,10 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
 #endif
     Core::Emulator::FillElfInfo(*config);
     const std::string title = config->title ? config->title : "Bloodborne";
-    const s32 width = config->width, height = config->height;
+    // The probe's ELF metadata carries the game's native 16:9 size. The host
+    // window follows the requested output mode instead (for example 2560x1080).
+    const s32 width = s32(EmulatorSettings.GetInternalScreenWidth());
+    const s32 height = s32(EmulatorSettings.GetInternalScreenHeight());
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("bb:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());

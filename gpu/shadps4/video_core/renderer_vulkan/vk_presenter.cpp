@@ -578,27 +578,50 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         }
     };
 
+    // Skipped frames still own source work on the GPU. Drain it before releasing
+    // the frame: its old present fence cannot protect work never submitted for present.
+    const auto skip_frame = [&] {
+        const vk::SemaphoreWaitInfo wait{.semaphoreCount = 1,
+                                          .pSemaphores = &frame->ready_semaphore,
+                                          .pValues = &frame->ready_tick};
+        const auto result = instance.GetDevice().waitSemaphores(wait,std::numeric_limits<u64>::max());
+        ASSERT_MSG(result == vk::Result::eSuccess, "Waiting for skipped frame failed: {}", vk::to_string(result));
+        free_frame();
+    };
+
     // bbport: a minimized window has no pixels on Windows (0x0); keep the swapchain and skip
     // presenting until the window is restored.
-    if (window.GetWidth() == 0 || window.GetHeight() == 0) {
-        free_frame();
+    if (!window.IsDrawable()) {
+        BbOverlay::PresentationSuspended();
+        skip_frame();
         return;
     }
 
+    const auto acquire_start = std::chrono::steady_clock::now();
     // Recreate the swapchain if the window was resized.
-    if (window.GetWidth() != swapchain.GetWidth() || window.GetHeight() != swapchain.GetHeight()) {
-        swapchain.Recreate(window.GetWidth(), window.GetHeight());
-    }
-
-    if (!swapchain.AcquireNextImage()) {
-        swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        if (!swapchain.AcquireNextImage()) {
-            // User resizes the window too fast and GPU can't keep up. Skip this frame.
-            LOG_WARNING(Render_Vulkan, "Skipping frame!");
-            free_frame();
+    if (swapchain.NeedsRecreation() || window.GetWidth() != swapchain.GetWidth() ||
+        window.GetHeight() != swapchain.GetHeight()) {
+        if (!swapchain.Recreate(window.GetWidth(), window.GetHeight())) {
+            skip_frame();
             return;
         }
     }
+
+    if (!swapchain.AcquireNextImage()) {
+        if (!swapchain.NeedsRecreation() || !window.IsDrawable() ||
+            !swapchain.Recreate(window.GetWidth(), window.GetHeight())) {
+            skip_frame();
+            return;
+        }
+        if (!swapchain.AcquireNextImage()) {
+            // User resizes the window too fast and GPU can't keep up. Skip this frame.
+            LOG_WARNING(Render_Vulkan, "Skipping frame!");
+            skip_frame();
+            return;
+        }
+    }
+
+    const double acquire_ms = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-acquire_start).count();
 
     // Reset fence for queue submission. Do it here instead of GetRenderFrame() because we may
     // skip frame because of slow swapchain recreation. If a frame skip occurs, we skip signal
@@ -726,13 +749,20 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     scheduler.Flush(info);
 
     // Present to swapchain.
+    const auto present_start = std::chrono::steady_clock::now();
+    bool presented = false;
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        presented = swapchain.Present();
+        if (!presented && window.IsDrawable()) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
 
+    if (presented && !is_reusing_frame && is_game_frame) {
+        BbOverlay::RecordPresentedFrame(acquire_ms, std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now()-present_start).count());
+    }
     free_frame();
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
@@ -782,7 +812,12 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
     if (width <= 0 || height <= 0) {
         return; // no surface (minimized window): keep the last frame size
     }
-    const float ratio = (float)width / (float)height;
+    const u32 configured_width = EmulatorSettings.GetInternalScreenWidth();
+    const u32 configured_height = EmulatorSettings.GetInternalScreenHeight();
+    const float ratio = configured_width && configured_height
+                            ? static_cast<float>(configured_width) / configured_height
+                            : static_cast<float>(width) / height;
+    expected_ratio = ratio;
 
     expected_frame_height = height;
     expected_frame_width = width;
