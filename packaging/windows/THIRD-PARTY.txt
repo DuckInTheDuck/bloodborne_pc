@@ -1,0 +1,22 @@
+Third-party components retain their original licenses. See accompanying notices.
+
+Native runtime, Windows port and renderer source:
+https://github.com/DuckInTheDuck/bloodborne_pc
+https://github.com/Supermedo/bloodborne_pc
+https://github.com/deadinside28/bloodborne_pc
+https://github.com/shadps4-emu/shadPS4
+
+Bundled CLANG64 libraries are built and distributed by MSYS2. Package build recipes,
+source URLs, versions and patches are available at:
+https://github.com/msys2/MINGW-packages
+https://packages.msys2.org/
+https://repo.msys2.org/mingw/sources/
+
+Python runtime: https://www.python.org/ (PSF license).
+PyInstaller: https://github.com/pyinstaller/pyinstaller (GPL with bootloader exception).
+SDL3: https://github.com/libsdl-org/SDL (zlib).
+FFmpeg: https://ffmpeg.org/ (see MSYS2 ffmpeg license notice for the packaged build).
+FSR-Vulkan: https://github.com/FireBurn/FSR-Vulkan (GPL-2.0).
+FSR4 shader assets: see fsr4_shaders/LICENSE-FSR4-v07.txt.
+
+No Bloodborne game files or Sony firmware are supplied.

@@ -29,7 +29,7 @@
 
 ## Запуск
 
-Когда архив опубликован, скачайте его из [Releases этого форка](https://github.com/DuckInTheDuck/bloodborne_pc/releases).
+**[Скачать готовую сборку для Windows](https://github.com/DuckInTheDuck/bloodborne_pc/releases/latest)** — без компиляции и установки компонентов.
 
 1. Распакуйте весь переносимый пакет.
 2. Поместите файлы игры в `game/` или выберите существующую папку в лаунчере.

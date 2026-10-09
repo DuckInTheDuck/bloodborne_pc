@@ -64,6 +64,17 @@ out/pyenv/Scripts/python.exe packaging/windows/native_dependencies.py \
 cp -r scripts patches "$dest/"
 cp run.py LICENSE README.md README.ru.md CHANGELOG.md packaging/windows/README-Windows.txt "$dest/"
 cp game/README.md "$dest/game/README.md"
+mkdir -p "$dest/licenses/source"
+cp -r "$msys2_root/clang64/share/licenses/." "$dest/licenses/"
+for component in gpu/third_party/imgui gpu/third_party/miniz gpu/third_party/xbyak \
+                 gpu/third_party/magic_enum gpu/third_party/sirit third_party/LibAtrac9; do
+    for notice in "$component"/LICENSE* "$component"/COPYING*; do
+        if [[ -f "$notice" ]]; then
+            cp "$notice" "$dest/licenses/source/$(basename "$component")-$(basename "$notice")"
+        fi
+    done
+done
+cp packaging/windows/THIRD-PARTY.txt "$dest/licenses/THIRD-PARTY.txt"
 cp packaging/windows/START-RU.txt "$dest/НАЧАТЬ.txt"
 cp packaging/windows/START-RU.txt "$dest/game/КУДА-ПОЛОЖИТЬ-ИГРУ.txt"
 assets=fsr4_shaders

@@ -29,7 +29,7 @@ navigation; pointer selection is not implemented. Some overlays remain 16:9.
 
 ## Playing
 
-When a release archive is available, use [this fork's Releases](https://github.com/DuckInTheDuck/bloodborne_pc/releases).
+**[Download the portable Windows build](https://github.com/DuckInTheDuck/bloodborne_pc/releases/latest)** — no building or dependency installation required.
 
 1. Extract the complete portable package.
 2. Put your game files in `game/`, or select an existing game directory in the launcher.
