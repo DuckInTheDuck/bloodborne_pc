@@ -84,7 +84,8 @@ class NativeUiTests(unittest.TestCase):
         self.assertEqual(scaled_sizes({'output_res': '3840x2160', 'preset': '3'}),
                          ((1916, 1078), (3840, 2160)))
         # TAA is native-only and uses the live host targets.
-        self.assertIsNone(scaled_sizes({'output_res': '1280x720', 'upscaler': 'taa', 'preset': '3'}))
+        self.assertEqual(scaled_sizes({'output_res': '1280x720', 'upscaler': 'taa', 'preset': '3'}),
+                         ((1280, 720), (1280, 720)))
 
 
 class DebugPatchTests(unittest.TestCase):
